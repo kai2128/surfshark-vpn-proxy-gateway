@@ -61,7 +61,7 @@ surfshark-vpn-proxy-gateway/
 Run:
 ```bash
 cd /Volumes/tofu/Projects/surfshark-vpn-proxy-gateway
-go mod init github.com/tofu/surfshark-vpn-proxy-gateway
+go mod init surfshark-proxy
 ```
 
 - [ ] **Step 2: Create config package**
@@ -130,7 +130,7 @@ package main
 import (
 	"log"
 
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/config"
+	"surfshark-proxy/internal/config"
 )
 
 func main() {
@@ -854,8 +854,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/parser"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/session"
+	"surfshark-proxy/internal/parser"
+	"surfshark-proxy/internal/session"
 )
 
 // mockWorkerPool 用于测试的 mock worker pool
@@ -995,8 +995,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/parser"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/session"
+	"surfshark-proxy/internal/parser"
+	"surfshark-proxy/internal/session"
 )
 
 // WorkerState worker 状态
@@ -1445,9 +1445,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/discovery"
-	nsmanager "github.com/tofu/surfshark-vpn-proxy-gateway/internal/netns"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/router"
+	"surfshark-proxy/internal/discovery"
+	nsmanager "surfshark-proxy/internal/netns"
+	"surfshark-proxy/internal/router"
 	vishnetns "github.com/vishvananda/netns"
 )
 
@@ -1547,11 +1547,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/discovery"
-	nsmanager "github.com/tofu/surfshark-vpn-proxy-gateway/internal/netns"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/router"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/session"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/worker"
+	"surfshark-proxy/internal/discovery"
+	nsmanager "surfshark-proxy/internal/netns"
+	"surfshark-proxy/internal/router"
+	"surfshark-proxy/internal/session"
+	"surfshark-proxy/internal/worker"
 	vishnetns "github.com/vishvananda/netns"
 )
 
@@ -1818,9 +1818,9 @@ import (
 
 	"github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/statute"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/config"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/parser"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/router"
+	"surfshark-proxy/internal/config"
+	"surfshark-proxy/internal/parser"
+	"surfshark-proxy/internal/router"
 	vishnetns "github.com/vishvananda/netns"
 )
 
@@ -1981,9 +1981,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/config"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/parser"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/router"
+	"surfshark-proxy/internal/config"
+	"surfshark-proxy/internal/parser"
+	"surfshark-proxy/internal/router"
 )
 
 // HTTPProxyServer HTTP/HTTPS 代理服务器
@@ -2217,12 +2217,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/config"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/discovery"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/proxy"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/router"
-	"github.com/tofu/surfshark-vpn-proxy-gateway/internal/session"
-	workermgr "github.com/tofu/surfshark-vpn-proxy-gateway/internal/worker"
+	"surfshark-proxy/internal/config"
+	"surfshark-proxy/internal/discovery"
+	"surfshark-proxy/internal/proxy"
+	"surfshark-proxy/internal/router"
+	"surfshark-proxy/internal/session"
+	workermgr "surfshark-proxy/internal/worker"
 )
 
 func main() {
