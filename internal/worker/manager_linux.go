@@ -352,7 +352,10 @@ func (m *Manager) createWorker(server discovery.Server, index int) (*Worker, err
 
 	m.mu.Lock()
 	m.workers[worker.ID] = worker
+	count := len(m.workers)
 	m.mu.Unlock()
+
+	log.Printf("worker %s 已创建 [%s/%s]，当前共 %d 个 worker", worker.ID, server.Country, server.Name, count)
 
 	return worker, nil
 }
@@ -402,6 +405,7 @@ func (m *Manager) checkWorkers() {
 	type victim struct {
 		id     string
 		worker *Worker
+		reason string
 	}
 
 	var victims []victim
@@ -410,7 +414,7 @@ func (m *Manager) checkWorkers() {
 	m.mu.Lock()
 	for id, worker := range m.workers {
 		if worker.ProcessExited() {
-			victims = append(victims, victim{id: id, worker: worker})
+			victims = append(victims, victim{id: id, worker: worker, reason: "进程退出"})
 			delete(m.workers, id)
 			m.releaseIndex(worker.Index)
 			continue
@@ -426,7 +430,7 @@ func (m *Manager) checkWorkers() {
 
 		// Closing 且连接已排空：立即回收。sticky session 由 sessionMgr.RemoveByWorker 清理。
 		if worker.isClosingDrained() {
-			victims = append(victims, victim{id: id, worker: worker})
+			victims = append(victims, victim{id: id, worker: worker, reason: "达到最大寿命"})
 			delete(m.workers, id)
 			m.releaseIndex(worker.Index)
 			continue
@@ -435,16 +439,18 @@ func (m *Manager) checkWorkers() {
 		if worker.IsIdle() &&
 			m.sessionMgr.ActiveSessionsForWorker(id) == 0 &&
 			time.Since(worker.LastUsedAt()) > m.idleTimeout {
-			victims = append(victims, victim{id: id, worker: worker})
+			victims = append(victims, victim{id: id, worker: worker, reason: "空闲超时"})
 			delete(m.workers, id)
 			m.releaseIndex(worker.Index)
 		}
 	}
+	remaining := len(m.workers)
 	m.mu.Unlock()
 
 	for _, victim := range victims {
 		_ = victim.worker.Stop()
 		m.sessionMgr.RemoveByWorker(victim.id)
+		log.Printf("worker %s 已销毁 (%s)，当前共 %d 个 worker", victim.id, victim.reason, remaining)
 	}
 
 	// 回收或标记 Closing 都会让 countReady 下降，让扩容协程尽快补位。
