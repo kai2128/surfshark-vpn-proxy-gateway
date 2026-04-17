@@ -40,7 +40,7 @@ func main() {
 	defer cancel()
 
 	sessionManager := session.NewManager(cfg.DefaultSessionTTL)
-	workerManager := workermgr.New(servers, cfg.AuthFile, sessionManager, cfg.WorkerIdleTimeout, cfg.MinPoolSize)
+	workerManager := workermgr.New(servers, cfg.AuthFile, sessionManager, cfg.WorkerIdleTimeout, cfg.WorkerMaxLifetime, cfg.MinPoolSize, cfg.WorkerVerbose)
 	routerInstance := router.New(workerManager, sessionManager)
 
 	go cleanupSessions(ctx, sessionManager)

@@ -21,9 +21,11 @@ services:
     environment:
       PROXY_USER: ${PROXY_USER:-user}
       PROXY_PASS: ${PROXY_PASS:-pass}
-      DEFAULT_SESSION_TTL: ${DEFAULT_SESSION_TTL:-30}
-      WORKER_IDLE_TIMEOUT: ${WORKER_IDLE_TIMEOUT:-10}
+      DEFAULT_SESSION_TTL: ${DEFAULT_SESSION_TTL:-30} # MINUTES
+      WORKER_IDLE_TIMEOUT: ${WORKER_IDLE_TIMEOUT:-10} # MINUTES
+      WORKER_MAX_LIFETIME: ${WORKER_MAX_LIFETIME:-60} # MINUTES
       MIN_POOL_SIZE: ${MIN_POOL_SIZE:-10}
+      WORKER_VERBOSE: ${WORKER_VERBOSE:-false}
     sysctls:
       net.ipv4.ip_forward: "1"
     restart: unless-stopped

@@ -17,12 +17,14 @@ import (
 type Manager struct{}
 
 // New 返回一个不可用的 stub manager。
-func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration, minPoolSize int) *Manager {
+func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout, maxLifetime time.Duration, minPoolSize int, verbose bool) *Manager {
 	_ = servers
 	_ = authFile
 	_ = sessionMgr
 	_ = idleTimeout
+	_ = maxLifetime
 	_ = minPoolSize
+	_ = verbose
 	return &Manager{}
 }
 

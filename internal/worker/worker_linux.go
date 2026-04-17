@@ -113,6 +113,33 @@ func (w *Worker) markReady() {
 	w.LastUsed = time.Now()
 }
 
+// Age 返回 worker 已存活时长。
+func (w *Worker) Age() time.Duration {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return time.Since(w.CreatedAt)
+}
+
+// markClosing 标记 worker 进入 draining 状态，停止接纳新请求。
+// 只有 Ready/Idle 状态的 worker 会被标记，已经 Closing/Creating 的保持原状。
+// 返回 true 表示本次调用真的发生了状态转换。
+func (w *Worker) markClosing() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.State == router.WorkerReady || w.State == router.WorkerIdle {
+		w.State = router.WorkerClosing
+		return true
+	}
+	return false
+}
+
+// isClosingDrained 判断是否已进入 Closing 且所有连接都已排空，可以回收。
+func (w *Worker) isClosingDrained() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.State == router.WorkerClosing && w.ActiveConns == 0
+}
+
 // Stop 停止进程并释放命名空间资源。
 func (w *Worker) Stop() error {
 	w.stopOnce.Do(func() {

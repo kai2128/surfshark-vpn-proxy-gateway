@@ -36,7 +36,9 @@ type Manager struct {
 	authFile    string
 	sessionMgr  *session.Manager
 	idleTimeout time.Duration
+	maxLifetime time.Duration
 	minPoolSize int
+	verbose     bool
 	createGroup singleflight.Group
 	// wakeup 用于在 worker 进程退出时立刻触发健康检查，
 	// 避免等待 30 秒 ticker。缓冲为 1：多次信号合并为一次检查。
@@ -47,7 +49,7 @@ type Manager struct {
 }
 
 // New 创建 worker 管理器。
-func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration, minPoolSize int) *Manager {
+func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout, maxLifetime time.Duration, minPoolSize int, verbose bool) *Manager {
 	return &Manager{
 		workers:     make(map[string]*Worker),
 		usedIndexes: make(map[int]bool),
@@ -55,7 +57,9 @@ func New(servers map[string][]discovery.Server, authFile string, sessionMgr *ses
 		authFile:    authFile,
 		sessionMgr:  sessionMgr,
 		idleTimeout: idleTimeout,
+		maxLifetime: maxLifetime,
 		minPoolSize: minPoolSize,
+		verbose:     verbose,
 		wakeup:      make(chan struct{}, 1),
 		grow:        make(chan struct{}, 1),
 	}
@@ -269,39 +273,55 @@ func (m *Manager) createWorker(server discovery.Server, index int) (*Worker, err
 		return nil, fmt.Errorf("create namespace %s: %w", namespaceName, err)
 	}
 
+	verb := "1"
+	if m.verbose {
+		verb = "3"
+	}
+
 	cmd := exec.Command(
 		"ip", "netns", "exec", namespaceName,
 		"openvpn",
 		"--config", server.OvpnPath,
 		"--auth-user-pass", m.authFile,
 		"--auth-nocache",
-		"--verb", "3",
+		"--verb", verb,
 		"--connect-retry", "3",
 		"--connect-timeout", "30",
 	)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = namespace.Destroy()
-		return nil, fmt.Errorf("pipe openvpn stdout: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = namespace.Destroy()
-		return nil, fmt.Errorf("pipe openvpn stderr: %w", err)
-	}
+	if m.verbose {
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			_ = namespace.Destroy()
+			return nil, fmt.Errorf("pipe openvpn stdout: %w", err)
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			_ = namespace.Destroy()
+			return nil, fmt.Errorf("pipe openvpn stderr: %w", err)
+		}
 
-	if err := cmd.Start(); err != nil {
-		_ = namespace.Destroy()
-		return nil, fmt.Errorf("start openvpn: %w", err)
+		if err := cmd.Start(); err != nil {
+			_ = namespace.Destroy()
+			return nil, fmt.Errorf("start openvpn: %w", err)
+		}
+
+		// 把 OpenVPN 的输出转到网关日志（加 worker ID 前缀），方便诊断。
+		go pumpLog(namespaceName, "stdout", stdout)
+		go pumpLog(namespaceName, "stderr", stderr)
+
+		// 一次性打印 netns 的关键状态，定位 DNS/路由问题。
+		diagnoseNetns(namespaceName)
+	} else {
+		// 静默模式：丢弃子进程所有输出。
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+
+		if err := cmd.Start(); err != nil {
+			_ = namespace.Destroy()
+			return nil, fmt.Errorf("start openvpn: %w", err)
+		}
 	}
-
-	// 把 OpenVPN 的输出转到网关日志（加 worker ID 前缀），方便诊断。
-	go pumpLog(namespaceName, "stdout", stdout)
-	go pumpLog(namespaceName, "stderr", stderr)
-
-	// 一次性打印 netns 的关键状态，定位 DNS/路由问题。
-	diagnoseNetns(namespaceName)
 
 	worker := &Worker{
 		ID:          namespaceName,
@@ -385,10 +405,27 @@ func (m *Manager) checkWorkers() {
 	}
 
 	var victims []victim
+	marked := 0
 
 	m.mu.Lock()
 	for id, worker := range m.workers {
 		if worker.ProcessExited() {
+			victims = append(victims, victim{id: id, worker: worker})
+			delete(m.workers, id)
+			m.releaseIndex(worker.Index)
+			continue
+		}
+
+		// 超过最大寿命：标记 Closing，新请求不再路由到它，等待活跃连接排空。
+		if m.maxLifetime > 0 && worker.Age() > m.maxLifetime {
+			if worker.markClosing() {
+				marked++
+				log.Printf("worker %s 达到最大寿命 %v，进入 draining", id, m.maxLifetime)
+			}
+		}
+
+		// Closing 且连接已排空：立即回收。sticky session 由 sessionMgr.RemoveByWorker 清理。
+		if worker.isClosingDrained() {
 			victims = append(victims, victim{id: id, worker: worker})
 			delete(m.workers, id)
 			m.releaseIndex(worker.Index)
@@ -410,8 +447,8 @@ func (m *Manager) checkWorkers() {
 		m.sessionMgr.RemoveByWorker(victim.id)
 	}
 
-	// 回收完 worker，池可能跌破 minPoolSize，让扩容协程补位。
-	if len(victims) > 0 {
+	// 回收或标记 Closing 都会让 countReady 下降，让扩容协程尽快补位。
+	if len(victims) > 0 || marked > 0 {
 		m.signalGrow()
 	}
 }
