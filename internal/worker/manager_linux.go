@@ -3,13 +3,14 @@
 package worker
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os/exec"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	vishnetns "github.com/vishvananda/netns"
@@ -20,29 +21,64 @@ import (
 	"surfshark-proxy/internal/session"
 )
 
-const createMaxAttempts = 3
+const (
+	createMaxAttempts = 3
+	// maxNamespaceIndex 对应 netns IP 中的 byte(index) 取值范围。
+	maxNamespaceIndex = 254
+)
 
 // Manager 负责 worker 的创建、查询、回收与关闭。
 type Manager struct {
-	mu           sync.RWMutex
-	workers      map[string]*Worker
-	servers      map[string][]discovery.Server
-	authFile     string
-	sessionMgr   *session.Manager
-	idleTimeout  time.Duration
-	indexCounter atomic.Int32
-	createGroup  singleflight.Group
+	mu          sync.RWMutex
+	workers     map[string]*Worker
+	usedIndexes map[int]bool // 当前被占用的 netns 索引
+	servers     map[string][]discovery.Server
+	authFile    string
+	sessionMgr  *session.Manager
+	idleTimeout time.Duration
+	createGroup singleflight.Group
+	// wakeup 用于在 worker 进程退出时立刻触发健康检查，
+	// 避免等待 30 秒 ticker。缓冲为 1：多次信号合并为一次检查。
+	wakeup chan struct{}
 }
 
 // New 创建 worker 管理器。
 func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration) *Manager {
 	return &Manager{
 		workers:     make(map[string]*Worker),
+		usedIndexes: make(map[int]bool),
 		servers:     cloneServers(servers),
 		authFile:    authFile,
 		sessionMgr:  sessionMgr,
 		idleTimeout: idleTimeout,
+		wakeup:      make(chan struct{}, 1),
 	}
+}
+
+// signalWakeup 非阻塞地唤醒健康检查协程。
+func (m *Manager) signalWakeup() {
+	select {
+	case m.wakeup <- struct{}{}:
+	default:
+	}
+}
+
+// acquireIndex 分配最小可用的 netns 索引，找不到返回 -1。
+// 调用者必须持有 m.mu 的写锁。
+func (m *Manager) acquireIndex() int {
+	for candidate := 0; candidate <= maxNamespaceIndex; candidate++ {
+		if !m.usedIndexes[candidate] {
+			m.usedIndexes[candidate] = true
+			return candidate
+		}
+	}
+	return -1
+}
+
+// releaseIndex 归还索引供后续 worker 复用。
+// 调用者必须持有 m.mu 的写锁。
+func (m *Manager) releaseIndex(index int) {
+	delete(m.usedIndexes, index)
 }
 
 // GetReadyWorkers 返回已就绪 worker 列表。
@@ -107,17 +143,27 @@ func (m *Manager) createForCountry(country string) (*router.WorkerInfo, error) {
 		attempts = len(candidates)
 	}
 
-	startOffset := int(m.indexCounter.Load())
 	var lastErr error
-
 	for attempt := 0; attempt < attempts; attempt++ {
-		namespaceIndex := int(m.indexCounter.Add(1) - 1)
-		server := candidates[(startOffset+attempt)%len(candidates)]
+		m.mu.Lock()
+		namespaceIndex := m.acquireIndex()
+		m.mu.Unlock()
+
+		if namespaceIndex < 0 {
+			return nil, fmt.Errorf("namespace index pool exhausted (max %d)", maxNamespaceIndex+1)
+		}
+
+		server := candidates[(namespaceIndex+attempt)%len(candidates)]
 
 		worker, err := m.createWorker(server, namespaceIndex)
 		if err == nil {
 			return worker.Info(), nil
 		}
+
+		// 创建失败：归还索引供后续尝试复用。
+		m.mu.Lock()
+		m.releaseIndex(namespaceIndex)
+		m.mu.Unlock()
 
 		lastErr = err
 		log.Printf("创建 worker 失败，国家=%s，服务器=%s，尝试=%d/%d: %v", country, server.Name, attempt+1, attempts, err)
@@ -205,13 +251,32 @@ func (m *Manager) createWorker(server discovery.Server, index int) (*Worker, err
 		"--connect-timeout", "30",
 	)
 
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = namespace.Destroy()
+		return nil, fmt.Errorf("pipe openvpn stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = namespace.Destroy()
+		return nil, fmt.Errorf("pipe openvpn stderr: %w", err)
+	}
+
 	if err := cmd.Start(); err != nil {
 		_ = namespace.Destroy()
 		return nil, fmt.Errorf("start openvpn: %w", err)
 	}
 
+	// 把 OpenVPN 的输出转到网关日志（加 worker ID 前缀），方便诊断。
+	go pumpLog(namespaceName, "stdout", stdout)
+	go pumpLog(namespaceName, "stderr", stderr)
+
+	// 一次性打印 netns 的关键状态，定位 DNS/路由问题。
+	diagnoseNetns(namespaceName)
+
 	worker := &Worker{
 		ID:          namespaceName,
+		Index:       index,
 		Server:      server,
 		State:       router.WorkerCreating,
 		Namespace:   namespace,
@@ -225,6 +290,8 @@ func (m *Manager) createWorker(server discovery.Server, index int) (*Worker, err
 		_ = cmd.Wait()
 		worker.processExited.Store(true)
 		close(worker.processDone)
+		// 通知健康检查协程立即回收，而不是等下一次 ticker。
+		m.signalWakeup()
 	}()
 
 	if err := m.waitForTun(namespaceName, 30*time.Second); err != nil {
@@ -263,6 +330,7 @@ func (m *Manager) waitForTun(namespaceName string, timeout time.Duration) error 
 }
 
 // StartHealthCheck 启动后台巡检。
+// 在周期性 ticker 之外，还会响应 wakeup 信号（worker 进程退出时）立即清理。
 func (m *Manager) StartHealthCheck(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -273,6 +341,8 @@ func (m *Manager) StartHealthCheck(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				m.checkWorkers()
+			case <-m.wakeup:
 				m.checkWorkers()
 			}
 		}
@@ -292,6 +362,7 @@ func (m *Manager) checkWorkers() {
 		if worker.ProcessExited() {
 			victims = append(victims, victim{id: id, worker: worker})
 			delete(m.workers, id)
+			m.releaseIndex(worker.Index)
 			continue
 		}
 
@@ -300,6 +371,7 @@ func (m *Manager) checkWorkers() {
 			time.Since(worker.LastUsedAt()) > m.idleTimeout {
 			victims = append(victims, victim{id: id, worker: worker})
 			delete(m.workers, id)
+			m.releaseIndex(worker.Index)
 		}
 	}
 	m.mu.Unlock()
@@ -316,12 +388,47 @@ func (m *Manager) Shutdown() {
 	workers := make([]*Worker, 0, len(m.workers))
 	for _, worker := range m.workers {
 		workers = append(workers, worker)
+		m.releaseIndex(worker.Index)
 	}
 	m.workers = make(map[string]*Worker)
 	m.mu.Unlock()
 
 	for _, worker := range workers {
 		_ = worker.Stop()
+	}
+}
+
+// diagnoseNetns 打印 netns 内的关键网络状态，便于排查 DNS/路由故障。
+// 所有命令均为一次性执行，失败只记录日志，不影响调用方。
+func diagnoseNetns(namespaceName string) {
+	checks := []struct {
+		label string
+		args  []string
+	}{
+		{"resolv.conf", []string{"cat", "/etc/resolv.conf"}},
+		{"ip addr", []string{"ip", "addr"}},
+		{"ip route", []string{"ip", "route"}},
+		{"ping 1.1.1.1", []string{"ping", "-c", "1", "-W", "3", "1.1.1.1"}},
+	}
+
+	for _, check := range checks {
+		args := append([]string{"netns", "exec", namespaceName}, check.args...)
+		cmd := exec.Command("ip", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("[diagnose %s] %s failed: %v: %s", namespaceName, check.label, err, string(output))
+			continue
+		}
+		log.Printf("[diagnose %s] %s:\n%s", namespaceName, check.label, string(output))
+	}
+}
+
+// pumpLog 从 reader 持续读取行并打印到网关日志，直至 reader 关闭（进程结束）。
+func pumpLog(workerID, stream string, reader io.Reader) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		log.Printf("[openvpn %s %s] %s", workerID, stream, scanner.Text())
 	}
 }
 

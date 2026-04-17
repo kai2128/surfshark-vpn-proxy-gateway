@@ -32,9 +32,37 @@ func Create(name string, index int) (*Namespace, error) {
 		return nil, fmt.Errorf("namespace index out of range: %d", index)
 	}
 
+	// 预清理：上一次失败可能留下了 /run/netns/<name> 挂载点，
+	// 否则 vishnetns.NewNamed 会报 "file exists" 让整个重试流程卡死。
+	cleanupStaleNamespace(name)
+
+	// NewNamed 会把"当前线程"切入新 netns。必须先 LockOSThread 把
+	// goroutine 钉到线程上，再记录原 netns，调用完 NewNamed 立即切回，
+	// 否则后续 LinkAdd 会在 worker netns 里创建 veth pair，两端都落在
+	// 新 netns 里、host 端出不去。
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	origin, err := vishnetns.Get()
+	if err != nil {
+		return nil, fmt.Errorf("get current namespace: %w", err)
+	}
+	defer origin.Close()
+
 	handle, err := vishnetns.NewNamed(name)
 	if err != nil {
+		// NewNamed 失败时可能已经创建了 /run/netns/<name> 挂载点，
+		// 再次清理以防下次重试继续报 "file exists"。
+		cleanupStaleNamespace(name)
 		return nil, fmt.Errorf("create namespace %s: %w", name, err)
+	}
+
+	// 立刻切回原 netns，让后续 veth 创建发生在主 netns。
+	if err := vishnetns.Set(origin); err != nil {
+		_ = vishnetns.DeleteNamed(name)
+		_ = handle.Close()
+		cleanupStaleNamespace(name)
+		return nil, fmt.Errorf("restore origin namespace: %w", err)
 	}
 
 	namespace := &Namespace{
@@ -214,6 +242,8 @@ func (ns *Namespace) Destroy() error {
 	if ns.Handle.IsOpen() {
 		_ = ns.Handle.Close()
 	}
+	// 兜底：如果 DeleteNamed 没成功释放挂载点，手动清掉
+	cleanupStaleNamespace(ns.Name)
 	_ = os.RemoveAll(filepath.Join("/etc/netns", ns.Name))
 
 	return nil
@@ -227,4 +257,17 @@ func runCommand(name string, args ...string) error {
 	}
 
 	return nil
+}
+
+// cleanupStaleNamespace 尽力清理可能残留的 /run/netns/<name> 挂载点。
+// 用于 Create 前的预清理与失败回滚，所有错误都忽略。
+func cleanupStaleNamespace(name string) {
+	path := filepath.Join("/run/netns", name)
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+
+	// 先 umount（可能未挂载，忽略错误），再删除挂载点文件。
+	_ = exec.Command("umount", path).Run()
+	_ = os.Remove(path)
 }

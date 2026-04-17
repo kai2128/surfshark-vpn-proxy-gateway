@@ -53,6 +53,13 @@ func (d *NsDialer) DialInNs(ctx context.Context, nsHandle vishnetns.NsHandle, ne
 	case result := <-resultCh:
 		return result.conn, result.err
 	case <-ctx.Done():
+		// ctx 已取消，但 goroutine 可能仍在 dial。启动兜底协程：
+		// 如果后续收到 conn，及时 Close 防止泄漏。
+		go func() {
+			if late := <-resultCh; late.conn != nil {
+				_ = late.conn.Close()
+			}
+		}()
 		return nil, ctx.Err()
 	}
 }

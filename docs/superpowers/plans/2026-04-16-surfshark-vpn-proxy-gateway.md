@@ -571,98 +571,83 @@ import (
 	"time"
 )
 
-func TestGetOrCreate_NewSession(t *testing.T) {
+func TestLookup_NoSession(t *testing.T) {
 	m := NewManager(30 * time.Minute)
-
-	sess := m.GetOrCreate("sess1", "us", 0)
-	if sess.ID != "sess1" {
-		t.Errorf("expected ID 'sess1', got '%s'", sess.ID)
-	}
-	if sess.Country != "us" {
-		t.Errorf("expected country 'us', got '%s'", sess.Country)
-	}
-	// 新 session 未绑定 worker
-	if sess.WorkerID != "" {
-		t.Errorf("expected empty workerID, got '%s'", sess.WorkerID)
-	}
-	if sess.TTL != 30*time.Minute {
-		t.Errorf("expected default TTL 30m, got %v", sess.TTL)
+	snap, ok := m.Lookup("missing")
+	if ok {
+		t.Errorf("expected no session, got %+v", snap)
 	}
 }
 
-func TestGetOrCreate_ExistingSession(t *testing.T) {
+func TestBindAndLookup(t *testing.T) {
 	m := NewManager(30 * time.Minute)
 
-	sess1 := m.GetOrCreate("sess1", "us", 0)
-	sess1.WorkerID = "worker-0"
-	m.Update(sess1)
+	// 第一次调用 Bind：无已有 session，创建新的并绑定 worker
+	snap, created := m.Bind("sess1", "us", 0, "worker-0")
+	if !created {
+		t.Errorf("expected created=true")
+	}
+	if snap.WorkerID != "worker-0" {
+		t.Errorf("expected workerID 'worker-0', got '%s'", snap.WorkerID)
+	}
+	if snap.TTL != 30*time.Minute {
+		t.Errorf("expected default TTL 30m, got %v", snap.TTL)
+	}
 
-	sess2 := m.GetOrCreate("sess1", "us", 0)
-	if sess2.WorkerID != "worker-0" {
-		t.Errorf("expected existing worker 'worker-0', got '%s'", sess2.WorkerID)
+	// Lookup 返回已有 session
+	snap2, ok := m.Lookup("sess1")
+	if !ok {
+		t.Fatalf("expected session to exist")
+	}
+	if snap2.WorkerID != "worker-0" {
+		t.Errorf("expected existing worker 'worker-0', got '%s'", snap2.WorkerID)
 	}
 }
 
-func TestGetOrCreate_CustomTTL(t *testing.T) {
+func TestBind_CustomTTL(t *testing.T) {
 	m := NewManager(30 * time.Minute)
-
-	sess := m.GetOrCreate("sess1", "jp", 60*time.Minute)
-	if sess.TTL != 60*time.Minute {
-		t.Errorf("expected custom TTL 60m, got %v", sess.TTL)
+	snap, _ := m.Bind("sess1", "jp", 60*time.Minute, "worker-0")
+	if snap.TTL != 60*time.Minute {
+		t.Errorf("expected custom TTL 60m, got %v", snap.TTL)
 	}
 }
 
-func TestGetOrCreate_ExpiredSession(t *testing.T) {
+func TestLookup_ExpiredSession(t *testing.T) {
 	m := NewManager(1 * time.Millisecond)
-
-	sess := m.GetOrCreate("sess1", "us", 1*time.Millisecond)
-	sess.WorkerID = "worker-0"
-	m.Update(sess)
+	m.Bind("sess1", "us", 1*time.Millisecond, "worker-0")
 
 	time.Sleep(5 * time.Millisecond)
 
-	// 过期后应返回新 session
-	sess2 := m.GetOrCreate("sess1", "us", 1*time.Millisecond)
-	if sess2.WorkerID != "" {
-		t.Errorf("expected empty workerID for expired session, got '%s'", sess2.WorkerID)
+	_, ok := m.Lookup("sess1")
+	if ok {
+		t.Errorf("expected expired session to be absent")
 	}
 }
 
 func TestRemoveByWorker(t *testing.T) {
 	m := NewManager(30 * time.Minute)
 
-	sess1 := m.GetOrCreate("sess1", "us", 0)
-	sess1.WorkerID = "worker-0"
-	m.Update(sess1)
-
-	sess2 := m.GetOrCreate("sess2", "us", 0)
-	sess2.WorkerID = "worker-0"
-	m.Update(sess2)
-
-	sess3 := m.GetOrCreate("sess3", "jp", 0)
-	sess3.WorkerID = "worker-1"
-	m.Update(sess3)
+	m.Bind("sess1", "us", 0, "worker-0")
+	m.Bind("sess2", "us", 0, "worker-0")
+	m.Bind("sess3", "jp", 0, "worker-1")
 
 	m.RemoveByWorker("worker-0")
 
-	// sess1 和 sess2 应被删除
-	s := m.GetOrCreate("sess1", "us", 0)
-	if s.WorkerID != "" {
+	if _, ok := m.Lookup("sess1"); ok {
 		t.Errorf("expected sess1 to be removed")
 	}
-	// sess3 应保留
-	s3 := m.GetOrCreate("sess3", "jp", 0)
-	if s3.WorkerID != "worker-1" {
-		t.Errorf("expected sess3 to still have worker-1")
+	if _, ok := m.Lookup("sess2"); ok {
+		t.Errorf("expected sess2 to be removed")
+	}
+	s3, ok := m.Lookup("sess3")
+	if !ok || s3.WorkerID != "worker-1" {
+		t.Errorf("expected sess3 to still have worker-1, got ok=%v s3=%+v", ok, s3)
 	}
 }
 
 func TestCleanup(t *testing.T) {
 	m := NewManager(1 * time.Millisecond)
-
-	sess := m.GetOrCreate("sess1", "us", 1*time.Millisecond)
-	sess.WorkerID = "worker-0"
-	m.Update(sess)
+	m.Bind("sess1", "us", 1*time.Millisecond, "worker-0")
 
 	time.Sleep(5 * time.Millisecond)
 
@@ -674,14 +659,8 @@ func TestCleanup(t *testing.T) {
 
 func TestActiveSessionsForWorker(t *testing.T) {
 	m := NewManager(30 * time.Minute)
-
-	sess1 := m.GetOrCreate("s1", "us", 0)
-	sess1.WorkerID = "worker-0"
-	m.Update(sess1)
-
-	sess2 := m.GetOrCreate("s2", "us", 0)
-	sess2.WorkerID = "worker-0"
-	m.Update(sess2)
+	m.Bind("s1", "us", 0, "worker-0")
+	m.Bind("s2", "us", 0, "worker-0")
 
 	count := m.ActiveSessionsForWorker("worker-0")
 	if count != 2 {
@@ -710,8 +689,9 @@ import (
 	"time"
 )
 
-// Session 表示一个 sticky session 映射
-type Session struct {
+// Snapshot 是 Session 的只读快照，安全跨 goroutine 传递
+// 外部不能直接修改，必须通过 Manager 的方法更新
+type Snapshot struct {
 	ID        string
 	WorkerID  string
 	Country   string
@@ -720,62 +700,87 @@ type Session struct {
 	LastUsed  time.Time
 }
 
-// IsExpired 检查 session 是否已过期
-func (s *Session) IsExpired() bool {
-	return time.Since(s.CreatedAt) > s.TTL
+// session 内部数据结构，仅在锁内访问
+type session struct {
+	id        string
+	workerID  string
+	country   string
+	ttl       time.Duration
+	createdAt time.Time
+	lastUsed  time.Time
+}
+
+func (s *session) isExpired() bool {
+	return time.Since(s.createdAt) > s.ttl
+}
+
+func (s *session) snapshot() Snapshot {
+	return Snapshot{
+		ID:        s.id,
+		WorkerID:  s.workerID,
+		Country:   s.country,
+		TTL:       s.ttl,
+		CreatedAt: s.createdAt,
+		LastUsed:  s.lastUsed,
+	}
 }
 
 // Manager 管理所有 sticky session
 type Manager struct {
 	mu         sync.RWMutex
-	sessions   map[string]*Session
+	sessions   map[string]*session
 	defaultTTL time.Duration
 }
 
 // NewManager 创建新的 session 管理器
 func NewManager(defaultTTL time.Duration) *Manager {
 	return &Manager{
-		sessions:   make(map[string]*Session),
+		sessions:   make(map[string]*session),
 		defaultTTL: defaultTTL,
 	}
 }
 
-// GetOrCreate 获取已有 session 或创建新 session
-// 如果 session 已过期，删除旧的并创建新的
+// Lookup 查找未过期的 session，返回其快照
+// 不存在或已过期返回 (_, false)
+func (m *Manager) Lookup(id string) (Snapshot, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	s, ok := m.sessions[id]
+	if !ok || s.isExpired() {
+		return Snapshot{}, false
+	}
+	return s.snapshot(), true
+}
+
+// Bind 绑定 session 到指定 worker
+// 如果 session 不存在则创建，已过期则重建，已存在未过期则直接更新 workerID
 // ttl 为 0 时使用默认值
-func (m *Manager) GetOrCreate(id, country string, ttl time.Duration) *Session {
+// 返回 (快照, 是否新创建)
+func (m *Manager) Bind(id, country string, ttl time.Duration, workerID string) (Snapshot, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if sess, ok := m.sessions[id]; ok {
-		if !sess.IsExpired() {
-			sess.LastUsed = time.Now()
-			return sess
-		}
-		// 过期，删除旧 session
-		delete(m.sessions, id)
-	}
 
 	if ttl == 0 {
 		ttl = m.defaultTTL
 	}
 
-	sess := &Session{
-		ID:        id,
-		Country:   country,
-		TTL:       ttl,
-		CreatedAt: time.Now(),
-		LastUsed:  time.Now(),
+	if s, ok := m.sessions[id]; ok && !s.isExpired() {
+		s.workerID = workerID
+		s.lastUsed = time.Now()
+		return s.snapshot(), false
 	}
-	m.sessions[id] = sess
-	return sess
-}
 
-// Update 更新已有 session（通常用于绑定 worker）
-func (m *Manager) Update(sess *Session) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.sessions[sess.ID] = sess
+	s := &session{
+		id:        id,
+		workerID:  workerID,
+		country:   country,
+		ttl:       ttl,
+		createdAt: time.Now(),
+		lastUsed:  time.Now(),
+	}
+	m.sessions[id] = s
+	return s.snapshot(), true
 }
 
 // RemoveByWorker 删除所有绑定到指定 worker 的 session
@@ -783,11 +788,18 @@ func (m *Manager) RemoveByWorker(workerID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for id, sess := range m.sessions {
-		if sess.WorkerID == workerID {
+	for id, s := range m.sessions {
+		if s.workerID == workerID {
 			delete(m.sessions, id)
 		}
 	}
+}
+
+// Remove 移除指定 session（例如 worker 不再可用时）
+func (m *Manager) Remove(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sessions, id)
 }
 
 // Cleanup 清理所有过期 session，返回清理数量
@@ -796,8 +808,8 @@ func (m *Manager) Cleanup() int {
 	defer m.mu.Unlock()
 
 	removed := 0
-	for id, sess := range m.sessions {
-		if sess.IsExpired() {
+	for id, s := range m.sessions {
+		if s.isExpired() {
 			delete(m.sessions, id)
 			removed++
 		}
@@ -811,8 +823,8 @@ func (m *Manager) ActiveSessionsForWorker(workerID string) int {
 	defer m.mu.RUnlock()
 
 	count := 0
-	for _, sess := range m.sessions {
-		if sess.WorkerID == workerID && !sess.IsExpired() {
+	for _, s := range m.sessions {
+		if s.workerID == workerID && !s.isExpired() {
 			count++
 		}
 	}
@@ -955,6 +967,15 @@ func TestStickySession(t *testing.T) {
 	if w1.ID != w2.ID {
 		t.Errorf("sticky session routed to different workers: %s vs %s", w1.ID, w2.ID)
 	}
+
+	// 验证 session 已绑定
+	snap, ok := sm.Lookup("sess1")
+	if !ok {
+		t.Fatalf("expected session 'sess1' to be bound")
+	}
+	if snap.WorkerID != w1.ID {
+		t.Errorf("expected session bound to %s, got %s", w1.ID, snap.WorkerID)
+	}
 }
 
 func TestRequestWorkerOnDemand(t *testing.T) {
@@ -992,7 +1013,6 @@ package router
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 
 	"surfshark-proxy/internal/parser"
@@ -1026,11 +1046,11 @@ type WorkerPool interface {
 }
 
 // Router 路由逻辑：选择 worker
+// Route 是并发安全的：session 操作由 session.Manager 保证，pool 操作由 WorkerPool 实现保证
 type Router struct {
 	pool    WorkerPool
 	session *session.Manager
 	counter atomic.Uint64 // round-robin 计数器
-	mu      sync.Mutex
 }
 
 // New 创建路由器
@@ -1043,56 +1063,47 @@ func New(pool WorkerPool, sessionMgr *session.Manager) *Router {
 
 // Route 根据请求参数选择目标 worker
 func (r *Router) Route(params parser.Params) (*WorkerInfo, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Sticky 模式
 	if params.IsSticky() {
 		return r.routeSticky(params)
 	}
-
-	// Rotating 模式
-	return r.routeRotating(params.Country)
+	return r.selectOrCreate(params.Country)
 }
 
 func (r *Router) routeSticky(params parser.Params) (*WorkerInfo, error) {
-	sess := r.session.GetOrCreate(params.SessionID, params.Country, params.SessionTTL)
-
-	// 已绑定 worker，检查是否仍然可用
-	if sess.WorkerID != "" {
-		workers := r.pool.GetReadyWorkers("")
-		for _, w := range workers {
-			if w.ID == sess.WorkerID {
-				return w, nil
-			}
+	// 查找已有 session，若存在且绑定的 worker 仍可用则复用
+	if snap, ok := r.session.Lookup(params.SessionID); ok && snap.WorkerID != "" {
+		if w := r.findReady(snap.WorkerID); w != nil {
+			return w, nil
 		}
-		// Worker 不可用，重新分配
+		// Worker 不可用，移除旧 session，下面重新分配
+		r.session.Remove(params.SessionID)
 	}
 
-	// 分配新 worker
+	// 分配新 worker 并绑定
 	w, err := r.selectOrCreate(params.Country)
 	if err != nil {
 		return nil, err
 	}
-
-	sess.WorkerID = w.ID
-	r.session.Update(sess)
+	r.session.Bind(params.SessionID, params.Country, params.SessionTTL, w.ID)
 	return w, nil
 }
 
-func (r *Router) routeRotating(country string) (*WorkerInfo, error) {
-	return r.selectOrCreate(country)
+func (r *Router) findReady(workerID string) *WorkerInfo {
+	for _, w := range r.pool.GetReadyWorkers("") {
+		if w.ID == workerID {
+			return w
+		}
+	}
+	return nil
 }
 
 func (r *Router) selectOrCreate(country string) (*WorkerInfo, error) {
 	workers := r.pool.GetReadyWorkers(country)
 	if len(workers) > 0 {
-		// Round-robin 选择
 		idx := r.counter.Add(1) - 1
 		return workers[idx%uint64(len(workers))], nil
 	}
 
-	// 没有可用 worker，按需创建
 	if country == "" {
 		return nil, fmt.Errorf("没有可用的 worker，且未指定国家")
 	}
@@ -1143,7 +1154,9 @@ package netns
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 
 	"github.com/vishvananda/netlink"
@@ -1152,25 +1165,30 @@ import (
 
 // Namespace 表示一个已创建的网络命名空间及其资源
 type Namespace struct {
-	Name     string            // 命名空间名称，如 "worker-0"
+	Name     string             // 命名空间名称，如 "worker-0"
+	Index    int                // 索引，用于 IP/子网计算
 	Handle   vishnetns.NsHandle // 命名空间文件句柄
-	VethHost string            // 宿主端 veth 名称
-	VethPeer string            // 命名空间端 veth 名称
-	HostIP   net.IP            // 宿主端 IP
-	PeerIP   net.IP            // 命名空间端 IP
+	VethHost string             // 宿主端 veth 名称
+	VethPeer string             // 命名空间端 veth 名称
+	HostIP   net.IP             // 宿主端 IP
+	PeerIP   net.IP             // 命名空间端 IP
+	Subnet   string             // 子网 CIDR，如 "10.200.0.0/30"
 }
 
 // Create 创建网络命名空间及 veth pair
 // index 用于生成唯一的名称和 IP 地址 (10.200.{index}.1/30 ↔ 10.200.{index}.2/30)
+// index 必须在 [0, 254] 范围内
+// 调用方需确保 index 的唯一性（worker manager 负责）
 func Create(name string, index int) (*Namespace, error) {
-	if index > 254 {
-		return nil, fmt.Errorf("index %d 超出范围 (最大 254)", index)
+	if index < 0 || index > 254 {
+		return nil, fmt.Errorf("index %d 超出范围 [0, 254]", index)
 	}
 
 	vethHost := fmt.Sprintf("veth-%s", name)
 	vethPeer := fmt.Sprintf("vpeer-%s", name)
-	hostIP := net.IPv4(10, 200, byte(index), 1)
-	peerIP := net.IPv4(10, 200, byte(index), 2)
+	hostIP := net.IPv4(10, 200, byte(index), 1).To4()
+	peerIP := net.IPv4(10, 200, byte(index), 2).To4()
+	subnet := fmt.Sprintf("10.200.%d.0/30", index)
 
 	// 1. 创建命名空间
 	handle, err := vishnetns.NewNamed(name)
@@ -1180,11 +1198,13 @@ func Create(name string, index int) (*Namespace, error) {
 
 	ns := &Namespace{
 		Name:     name,
+		Index:    index,
 		Handle:   handle,
 		VethHost: vethHost,
 		VethPeer: vethPeer,
 		HostIP:   hostIP,
 		PeerIP:   peerIP,
+		Subnet:   subnet,
 	}
 
 	// 2. 创建 veth pair
@@ -1225,35 +1245,50 @@ func Create(name string, index int) (*Namespace, error) {
 	}
 
 	// 5. 在命名空间内配置 peer 端
-	if err := ns.configurePeer(peerIP); err != nil {
+	if err := ns.configurePeer(); err != nil {
 		ns.Destroy()
 		return nil, fmt.Errorf("配置 peer 失败: %w", err)
 	}
 
 	// 6. 设置 NAT (iptables masquerade)
-	subnet := fmt.Sprintf("10.200.%d.0/30", index)
 	if err := exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
 		"-s", subnet, "-j", "MASQUERADE").Run(); err != nil {
 		ns.Destroy()
 		return nil, fmt.Errorf("设置 NAT 失败: %w", err)
 	}
 
+	// 7. 写 netns 专用 resolv.conf 防止 DNS 泄漏（OpenVPN 推送的 DNS 会覆盖此处）
+	if err := writeNsResolvConf(name); err != nil {
+		ns.Destroy()
+		return nil, fmt.Errorf("写 resolv.conf 失败: %w", err)
+	}
+
 	return ns, nil
 }
 
-// configurePeer 在命名空间内配置网络接口
-func (ns *Namespace) configurePeer(peerIP net.IP) error {
+// writeNsResolvConf 为命名空间写入初始 resolv.conf
+// Linux 会优先读取 /etc/netns/<name>/resolv.conf 而不是 /etc/resolv.conf
+// 初始用 1.1.1.1，OpenVPN 连接后会推送 Surfshark 的 DNS
+func writeNsResolvConf(name string) error {
+	dir := filepath.Join("/etc/netns", name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "resolv.conf"),
+		[]byte("nameserver 1.1.1.1\nnameserver 1.0.0.1\n"), 0644)
+}
+
+// configurePeer 在命名空间内配置网络接口 + kill-switch
+func (ns *Namespace) configurePeer() error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	// 保存当前命名空间
 	origNs, err := vishnetns.Get()
 	if err != nil {
 		return fmt.Errorf("获取当前命名空间失败: %w", err)
 	}
 	defer origNs.Close()
 
-	// 切换到 worker 命名空间
 	if err := vishnetns.Set(ns.Handle); err != nil {
 		return fmt.Errorf("切换命名空间失败: %w", err)
 	}
@@ -1271,7 +1306,7 @@ func (ns *Namespace) configurePeer(peerIP net.IP) error {
 	if err != nil {
 		return fmt.Errorf("获取 peer link 失败: %w", err)
 	}
-	addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/30", peerIP.String()))
+	addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/30", ns.PeerIP.String()))
 	if err := netlink.AddrAdd(peer, addr); err != nil {
 		return fmt.Errorf("设置 peer IP 失败: %w", err)
 	}
@@ -1280,36 +1315,64 @@ func (ns *Namespace) configurePeer(peerIP net.IP) error {
 	}
 
 	// 设置默认路由 → 宿主端
-	defaultRoute := &netlink.Route{
-		Gw: ns.HostIP,
-	}
+	// OpenVPN 连接后会用自己的路由覆盖此默认路由
+	defaultRoute := &netlink.Route{Gw: ns.HostIP}
 	if err := netlink.RouteAdd(defaultRoute); err != nil {
 		return fmt.Errorf("设置默认路由失败: %w", err)
+	}
+
+	// Kill-switch: 在命名空间内用 iptables 限制出站
+	// 仅允许：通过 tun0 出去的流量、到宿主端的 VPN 控制流量（握手）、lo
+	// 这样 VPN 断开（tun0 消失）时流量无出口，不会泄漏到明文
+	// 注意：握手阶段 tun0 还不存在，先允许通过 veth 出去；tun0 建立后 OpenVPN
+	// 会添加路由，将目标流量导向 tun0，其他非 VPN 流量通过 kill-switch 挡住
+	killSwitchRules := [][]string{
+		// 允许 lo
+		{"-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"},
+		// 允许已建立的连接
+		{"-A", "OUTPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
+		// 允许 DNS 到 1.1.1.1（握手前查询 Surfshark 服务器地址）
+		{"-A", "OUTPUT", "-p", "udp", "-d", "1.1.1.1", "--dport", "53", "-j", "ACCEPT"},
+		{"-A", "OUTPUT", "-p", "udp", "-d", "1.0.0.1", "--dport", "53", "-j", "ACCEPT"},
+		// 允许通过 tun 设备（VPN 隧道）出去
+		{"-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"},
+		// 允许通过 veth peer 到宿主端（VPN 控制通道需要）
+		{"-A", "OUTPUT", "-o", ns.VethPeer, "-j", "ACCEPT"},
+		// 默认拒绝
+		{"-P", "OUTPUT", "DROP"},
+	}
+	for _, rule := range killSwitchRules {
+		if err := exec.Command("iptables", rule...).Run(); err != nil {
+			return fmt.Errorf("设置 kill-switch 规则 %v 失败: %w", rule, err)
+		}
 	}
 
 	return nil
 }
 
-// Destroy 清理命名空间及相关资源
+// Destroy 清理命名空间及相关资源（幂等）
 func (ns *Namespace) Destroy() error {
+	// 清理 iptables 规则（使用存储的 subnet，避免字节偏移错误）
+	if ns.Subnet != "" {
+		exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
+			"-s", ns.Subnet, "-j", "MASQUERADE").Run()
+	}
+
 	// 删除宿主端 veth（peer 端会自动删除）
 	if link, err := netlink.LinkByName(ns.VethHost); err == nil {
 		netlink.LinkDel(link)
 	}
 
-	// 清理 iptables 规则
-	exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
-		"-s", fmt.Sprintf("10.200.%d.0/30", ns.ipIndex()), "-j", "MASQUERADE").Run()
-
 	// 删除命名空间
 	vishnetns.DeleteNamed(ns.Name)
-	ns.Handle.Close()
+	if ns.Handle > 0 {
+		ns.Handle.Close()
+	}
+
+	// 删除 resolv.conf
+	os.RemoveAll(filepath.Join("/etc/netns", ns.Name))
 
 	return nil
-}
-
-func (ns *Namespace) ipIndex() int {
-	return int(ns.HostIP[2])
 }
 ```
 
@@ -1432,7 +1495,22 @@ git commit -m "feat: 添加命名空间感知的 TCP dialer"
 - Create: `internal/worker/worker.go`
 - Create: `internal/worker/manager.go`
 
-- [ ] **Step 1: Implement worker struct**
+**设计要点（根据 codex 审查修复）：**
+- 两个文件使用同一 `package worker`（避免包名冲突）
+- Worker 索引通过 `Add()` 原子捕获，单次递增、避免重复
+- OpenVPN 存活检查使用后台 `Wait()` 协程 + 原子 done 标志（`ProcessState` 在未 Wait 前不会更新）
+- `checkWorkers` 持锁阶段仅收集需清理的 ID，实际 `Stop()` 在锁外执行
+- 按国家请求的创建合并（singleflight）：同一国家并发请求只触发一次 worker 创建
+- 创建失败时重试：最多 2 次，切换同国家内的不同服务器（符合 spec 错误处理）
+
+- [ ] **Step 1: 安装 singleflight 依赖**
+
+Run:
+```bash
+go get golang.org/x/sync/singleflight
+```
+
+- [ ] **Step 2: Implement worker struct**
 
 Create `internal/worker/worker.go`:
 
@@ -1443,6 +1521,8 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"surfshark-proxy/internal/discovery"
@@ -1462,6 +1542,10 @@ type Worker struct {
 	ActiveConns int
 	CreatedAt   time.Time
 	LastUsed    time.Time
+
+	// processExited 在 OpenVPN 进程退出时设为 true（由后台 Wait 协程置位）。
+	// 原因：cmd.ProcessState 仅在调用 Wait 之后才更新，不能用于轮询。
+	processExited atomic.Bool
 }
 
 // NsHandle 返回此 worker 的命名空间句柄
@@ -1495,6 +1579,9 @@ func (w *Worker) DecrConns() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.ActiveConns--
+	if w.ActiveConns < 0 {
+		w.ActiveConns = 0
+	}
 }
 
 // IsIdle 检查 worker 是否空闲
@@ -1504,22 +1591,47 @@ func (w *Worker) IsIdle() bool {
 	return w.ActiveConns <= 0
 }
 
+// ProcessExited 返回 OpenVPN 进程是否已退出。
+// 由后台 Wait 协程维护，可在任何时候安全读取。
+func (w *Worker) ProcessExited() bool {
+	return w.processExited.Load()
+}
+
+// LastUsedAt 返回 LastUsed 的快照（加锁读取）
+func (w *Worker) LastUsedAt() time.Time {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.LastUsed
+}
+
 // Stop 停止 OpenVPN 进程并清理命名空间
 func (w *Worker) Stop() error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	w.State = router.WorkerClosing
+	proc := w.OvpnProcess
+	ns := w.Namespace
+	w.mu.Unlock()
 
 	var errs []error
-	if w.OvpnProcess != nil && w.OvpnProcess.Process != nil {
-		if err := w.OvpnProcess.Process.Kill(); err != nil {
-			errs = append(errs, fmt.Errorf("停止 OpenVPN 失败: %w", err))
+	if proc != nil && proc.Process != nil {
+		// 优雅退出：先 SIGTERM，超时则 Kill
+		_ = proc.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() {
+			_ = proc.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			if err := proc.Process.Kill(); err != nil {
+				errs = append(errs, fmt.Errorf("强制停止 OpenVPN 失败: %w", err))
+			}
+			<-done
 		}
-		w.OvpnProcess.Wait()
 	}
-	if w.Namespace != nil {
-		if err := w.Namespace.Destroy(); err != nil {
+	if ns != nil {
+		if err := ns.Destroy(); err != nil {
 			errs = append(errs, fmt.Errorf("清理命名空间失败: %w", err))
 		}
 	}
@@ -1531,12 +1643,12 @@ func (w *Worker) Stop() error {
 }
 ```
 
-- [ ] **Step 2: Implement worker manager**
+- [ ] **Step 3: Implement worker manager**
 
 Create `internal/worker/manager.go`:
 
 ```go
-package manager
+package worker
 
 import (
 	"context"
@@ -1551,25 +1663,29 @@ import (
 	nsmanager "surfshark-proxy/internal/netns"
 	"surfshark-proxy/internal/router"
 	"surfshark-proxy/internal/session"
-	"surfshark-proxy/internal/worker"
+	"golang.org/x/sync/singleflight"
 	vishnetns "github.com/vishvananda/netns"
 )
+
+// 每国家每次创建尝试的最大次数（spec: 重试 2 次，不同服务器同国家）
+const createMaxAttempts = 3
 
 // Manager 管理所有 worker 的生命周期
 type Manager struct {
 	mu           sync.RWMutex
-	workers      map[string]*worker.Worker
+	workers      map[string]*Worker
 	servers      map[string][]discovery.Server // 按国家分组的服务器列表
 	authFile     string
 	sessionMgr   *session.Manager
 	idleTimeout  time.Duration
 	indexCounter atomic.Int32
+	createGroup  singleflight.Group // 合并同一国家的并发创建请求
 }
 
 // New 创建新的 worker 管理器
 func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration) *Manager {
 	return &Manager{
-		workers:     make(map[string]*worker.Worker),
+		workers:     make(map[string]*Worker),
 		servers:     servers,
 		authFile:    authFile,
 		sessionMgr:  sessionMgr,
@@ -1595,23 +1711,69 @@ func (m *Manager) GetReadyWorkers(country string) []*router.WorkerInfo {
 	return result
 }
 
-// RequestWorker 实现 router.WorkerPool 接口 - 按需创建 worker
+// RequestWorker 实现 router.WorkerPool 接口 - 按需创建 worker。
+// 使用 singleflight 合并同一国家的并发请求，避免重复创建。
 func (m *Manager) RequestWorker(country string) (*router.WorkerInfo, error) {
-	serverList, ok := m.servers[country]
-	if !ok || len(serverList) == 0 {
-		return nil, fmt.Errorf("国家 %s 没有可用的 VPN 服务器", country)
+	key := country
+	if key == "" {
+		key = "__any__"
 	}
-
-	// 轮换选择服务器
-	idx := int(m.indexCounter.Add(1)-1) % len(serverList)
-	server := serverList[idx]
-
-	w, err := m.createWorker(server)
+	v, err, _ := m.createGroup.Do(key, func() (any, error) {
+		// 二次检查：可能其他请求已经完成创建
+		if existing := m.pickReady(country); existing != nil {
+			return existing, nil
+		}
+		return m.createForCountry(country)
+	})
 	if err != nil {
 		return nil, err
 	}
+	return v.(*router.WorkerInfo), nil
+}
 
-	return w.Info(), nil
+func (m *Manager) pickReady(country string) *router.WorkerInfo {
+	ready := m.GetReadyWorkers(country)
+	if len(ready) == 0 {
+		return nil
+	}
+	return ready[0]
+}
+
+// createForCountry 尝试为指定国家创建 worker（带重试）
+func (m *Manager) createForCountry(country string) (*router.WorkerInfo, error) {
+	var serverList []discovery.Server
+	if country == "" {
+		for _, list := range m.servers {
+			serverList = append(serverList, list...)
+		}
+	} else {
+		list, ok := m.servers[country]
+		if !ok || len(list) == 0 {
+			return nil, fmt.Errorf("国家 %s 没有可用的 VPN 服务器", country)
+		}
+		serverList = list
+	}
+
+	maxAttempts := createMaxAttempts
+	if len(serverList) < maxAttempts {
+		maxAttempts = len(serverList)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// 为每次尝试分配独立的 index（atomic.Add 返回新值，减 1 得到当前索引）
+		index := int(m.indexCounter.Add(1) - 1)
+		server := serverList[index%len(serverList)]
+
+		w, err := m.createWorker(server, index)
+		if err == nil {
+			return w.Info(), nil
+		}
+		lastErr = err
+		log.Printf("创建 worker 失败（尝试 %d/%d, 服务器 %s）: %v",
+			attempt+1, maxAttempts, server.Name, err)
+	}
+	return nil, fmt.Errorf("创建 worker 失败，已重试 %d 次: %w", maxAttempts, lastErr)
 }
 
 // GetWorkerNsHandle 获取指定 worker 的命名空间句柄
@@ -1629,8 +1791,9 @@ func (m *Manager) GetWorkerNsHandle(workerID string) (vishnetns.NsHandle, error)
 // TrackConn 记录连接开始
 func (m *Manager) TrackConn(workerID string) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if w, ok := m.workers[workerID]; ok {
+	w, ok := m.workers[workerID]
+	m.mu.RUnlock()
+	if ok {
 		w.IncrConns()
 	}
 }
@@ -1638,16 +1801,16 @@ func (m *Manager) TrackConn(workerID string) {
 // UntrackConn 记录连接结束
 func (m *Manager) UntrackConn(workerID string) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if w, ok := m.workers[workerID]; ok {
+	w, ok := m.workers[workerID]
+	m.mu.RUnlock()
+	if ok {
 		w.DecrConns()
 	}
 }
 
-func (m *Manager) createWorker(server discovery.Server) (*worker.Worker, error) {
-	index := int(m.indexCounter.Load())
+// createWorker 创建单个 worker：netns → OpenVPN → 等待 tun 就绪
+func (m *Manager) createWorker(server discovery.Server, index int) (*Worker, error) {
 	name := fmt.Sprintf("worker-%d", index)
-
 	log.Printf("创建 worker %s → %s (%s)", name, server.Name, server.Country)
 
 	// 1. 创建网络命名空间
@@ -1667,11 +1830,11 @@ func (m *Manager) createWorker(server discovery.Server) (*worker.Worker, error) 
 		"--connect-timeout", "30",
 	)
 	if err := cmd.Start(); err != nil {
-		ns.Destroy()
+		_ = ns.Destroy()
 		return nil, fmt.Errorf("启动 OpenVPN 失败: %w", err)
 	}
 
-	w := &worker.Worker{
+	w := &Worker{
 		ID:          name,
 		Server:      server,
 		State:       router.WorkerCreating,
@@ -1681,13 +1844,23 @@ func (m *Manager) createWorker(server discovery.Server) (*worker.Worker, error) 
 		LastUsed:    time.Now(),
 	}
 
+	// 后台 Wait：进程退出时置位 processExited。
+	// 目的：避免僵尸进程 & 提供可靠的存活信号（ProcessState 未 Wait 前为 nil）。
+	go func() {
+		_ = cmd.Wait()
+		w.processExited.Store(true)
+	}()
+
 	// 3. 等待 VPN 连接建立（检查 tun 设备）
 	if err := m.waitForTun(name, 30*time.Second); err != nil {
-		w.Stop()
+		_ = w.Stop()
 		return nil, fmt.Errorf("等待 VPN 连接超时: %w", err)
 	}
 
+	w.mu.Lock()
 	w.State = router.WorkerReady
+	w.mu.Unlock()
+
 	m.mu.Lock()
 	m.workers[name] = w
 	m.mu.Unlock()
@@ -1709,7 +1882,6 @@ func (m *Manager) waitForTun(nsName string, timeout time.Duration) error {
 		case <-ctx.Done():
 			return fmt.Errorf("等待 tun 设备超时 (%v)", timeout)
 		case <-ticker.C:
-			// 检查命名空间中是否存在 tun 设备
 			out, err := exec.Command("ip", "netns", "exec", nsName,
 				"ip", "link", "show", "type", "tun").Output()
 			if err == nil && len(out) > 0 {
@@ -1724,7 +1896,6 @@ func (m *Manager) StartHealthCheck(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-
 		for {
 			select {
 			case <-ctx.Done():
@@ -1736,44 +1907,57 @@ func (m *Manager) StartHealthCheck(ctx context.Context) {
 	}()
 }
 
+// checkWorkers 持锁阶段只读取快照并删除 map 条目，
+// 实际的 Stop() 在锁外执行以避免长时间阻塞其他请求。
 func (m *Manager) checkWorkers() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	type victim struct {
+		id     string
+		w      *Worker
+		reason string
+	}
+	var victims []victim
 
+	m.mu.Lock()
 	for id, w := range m.workers {
-		// 检查 OpenVPN 进程是否存活
-		if w.OvpnProcess != nil && w.OvpnProcess.ProcessState != nil && w.OvpnProcess.ProcessState.Exited() {
-			log.Printf("Worker %s 的 OpenVPN 进程已退出，清理中...", id)
-			w.Stop()
-			m.sessionMgr.RemoveByWorker(id)
+		if w.ProcessExited() {
+			victims = append(victims, victim{id, w, "OpenVPN 进程已退出"})
 			delete(m.workers, id)
 			continue
 		}
-
-		// 空闲回收
-		if w.IsIdle() && m.sessionMgr.ActiveSessionsForWorker(id) == 0 &&
-			time.Since(w.LastUsed) > m.idleTimeout {
-			log.Printf("Worker %s 空闲超时，回收中...", id)
-			w.Stop()
+		if w.IsIdle() &&
+			m.sessionMgr.ActiveSessionsForWorker(id) == 0 &&
+			time.Since(w.LastUsedAt()) > m.idleTimeout {
+			victims = append(victims, victim{id, w, "空闲超时"})
 			delete(m.workers, id)
 		}
+	}
+	m.mu.Unlock()
+
+	for _, v := range victims {
+		log.Printf("Worker %s 回收中（%s）", v.id, v.reason)
+		_ = v.w.Stop()
+		m.sessionMgr.RemoveByWorker(v.id)
 	}
 }
 
 // Shutdown 停止所有 worker
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for id, w := range m.workers {
-		log.Printf("关闭 worker %s...", id)
-		w.Stop()
+	victims := make([]*Worker, 0, len(m.workers))
+	for _, w := range m.workers {
+		victims = append(victims, w)
 	}
-	m.workers = make(map[string]*worker.Worker)
+	m.workers = make(map[string]*Worker)
+	m.mu.Unlock()
+
+	for _, w := range victims {
+		log.Printf("关闭 worker %s...", w.ID)
+		_ = w.Stop()
+	}
 }
 ```
 
-- [ ] **Step 3: Verify build**
+- [ ] **Step 4: Verify build**
 
 Run:
 ```bash
@@ -1781,11 +1965,11 @@ GOOS=linux go build ./internal/worker/
 ```
 Expected: 编译成功
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add internal/worker/
-git commit -m "feat: 添加 worker 管理器，支持按需创建、健康检查和空闲回收"
+git add internal/worker/ go.mod go.sum
+git commit -m "feat: 添加 worker 管理器，支持按需创建、健康检查、空闲回收和重试"
 ```
 
 ---
@@ -1804,6 +1988,11 @@ go get github.com/things-go/go-socks5
 
 - [ ] **Step 2: Implement SOCKS5 server**
 
+**设计要点（根据 codex 审查修复）：**
+- `CredentialStore.Valid` 签名必须为 `(user, password, userAddr string) bool`（things-go/go-socks5 的实际接口）
+- 用户名参数通过 `WithDialAndRequest` 从 `request.AuthContext.Payload["Username"]` 读取（不是 `ctx.Value`）
+- `trackedConn.closed` 使用 `atomic.Bool`（Close 和 Read 可能并发触发）
+
 Create `internal/proxy/socks5.go`:
 
 ```go
@@ -1815,9 +2004,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync/atomic"
 
 	"github.com/things-go/go-socks5"
-	"github.com/things-go/go-socks5/statute"
 	"surfshark-proxy/internal/config"
 	"surfshark-proxy/internal/parser"
 	"surfshark-proxy/internal/router"
@@ -1849,12 +2038,13 @@ func NewSocks5Server(cfg config.Config, r *router.Router, resolver NsHandleResol
 	}
 }
 
-// credentialStore 实现 socks5 的认证接口，同时提取用户名参数
+// credentialStore 实现 go-socks5 的 CredentialStore 接口。
+// 注意：Valid 的签名是 (user, password, userAddr string) bool，不是 2 参数。
 type credentialStore struct {
 	cfg config.Config
 }
 
-func (cs *credentialStore) Valid(user, password string) bool {
+func (cs *credentialStore) Valid(user, password, userAddr string) bool {
 	params := parser.Parse(user, password)
 	return params.Username == cs.cfg.ProxyUser && password == cs.cfg.ProxyPass
 }
@@ -1867,7 +2057,9 @@ func (s *Socks5Server) ListenAndServe(ctx context.Context) error {
 				Credentials: &credentialStore{cfg: s.cfg},
 			},
 		}),
-		socks5.WithDial(s.dialFunc),
+		// 使用 WithDialAndRequest 以便从 request.AuthContext 中读取用户名参数。
+		// go-socks5 将认证阶段的用户名保存在 request.AuthContext.Payload["Username"]。
+		socks5.WithDialAndRequest(s.dialWithRequest),
 	)
 
 	addr := fmt.Sprintf(":%d", s.cfg.Socks5Port)
@@ -1886,12 +2078,11 @@ func (s *Socks5Server) ListenAndServe(ctx context.Context) error {
 	return server.Serve(listener)
 }
 
-// dialFunc 自定义 dial 函数 - 通过选定 worker 的命名空间拨号
-func (s *Socks5Server) dialFunc(ctx context.Context, network, addr string) (net.Conn, error) {
-	// 从 context 中获取用户名（go-socks5 将其放在 context 中）
+// dialWithRequest 通过选定 worker 的命名空间拨号，用户名参数从 request 的 AuthContext 读取
+func (s *Socks5Server) dialWithRequest(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
 	username := ""
-	if req, ok := ctx.Value(statute.CtxKeyUserName).(string); ok {
-		username = req
+	if request != nil && request.AuthContext != nil && request.AuthContext.Payload != nil {
+		username = request.AuthContext.Payload["Username"]
 	}
 
 	params := parser.Parse(username, "")
@@ -1912,21 +2103,20 @@ func (s *Socks5Server) dialFunc(ctx context.Context, network, addr string) (net.
 		return nil, err
 	}
 
-	// 包装 conn 以在关闭时减少计数
 	return &trackedConn{Conn: conn, workerID: w.ID, resolver: s.resolver}, nil
 }
 
-// trackedConn 包装 net.Conn，在关闭时减少 worker 的活跃连接计数
+// trackedConn 包装 net.Conn，在关闭时减少 worker 的活跃连接计数。
+// closed 使用 atomic.Bool 避免 Close 与 Read 的 EOF 路径并发触发双重 UntrackConn。
 type trackedConn struct {
 	net.Conn
 	workerID string
 	resolver NsHandleResolver
-	closed   bool
+	closed   atomic.Bool
 }
 
 func (tc *trackedConn) Close() error {
-	if !tc.closed {
-		tc.closed = true
+	if tc.closed.CompareAndSwap(false, true) {
 		tc.resolver.UntrackConn(tc.workerID)
 	}
 	return tc.Conn.Close()
@@ -1964,6 +2154,11 @@ git commit -m "feat: 添加 SOCKS5 代理服务器，支持用户名参数路由
 - Create: `internal/proxy/http.go`
 
 - [ ] **Step 1: Implement HTTP proxy server**
+
+**设计要点（根据 codex 审查修复）：**
+- 认证失败返回 `407 Proxy Authentication Required` 并附 `Proxy-Authenticate` header（HTTP 代理标准；原设计的 403 会让客户端不重试）
+- `dialTarget` 返回 `*trackedConn`，Close 时自动 UntrackConn（与 socks5 一致）
+- `pipe` 在双向任意一方结束后才返回；使用 `CloseRead/CloseWrite` 半关闭行为，保证 response 写完
 
 Create `internal/proxy/http.go`:
 
@@ -2018,25 +2213,30 @@ func (s *HTTPProxyServer) ListenAndServe(ctx context.Context) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		server.Shutdown(shutdownCtx)
+		_ = server.Shutdown(shutdownCtx)
 	}()
 
 	return server.ListenAndServe()
 }
 
+// writeProxyAuthRequired 返回 407 + Proxy-Authenticate header
+func (s *HTTPProxyServer) writeProxyAuthRequired(w http.ResponseWriter) {
+	w.Header().Set("Proxy-Authenticate", `Basic realm="proxy"`)
+	http.Error(w, "需要代理认证", http.StatusProxyAuthRequired)
+}
+
 // ServeHTTP 处理代理请求
 func (s *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 解析认证信息
 	username, password, ok := s.parseProxyAuth(r)
 	if !ok {
-		w.Header().Set("Proxy-Authenticate", "Basic realm=\"proxy\"")
-		http.Error(w, "需要代理认证", http.StatusProxyAuthRequired)
+		s.writeProxyAuthRequired(w)
 		return
 	}
 
 	params := parser.Parse(username, password)
 	if params.Username != s.cfg.ProxyUser || password != s.cfg.ProxyPass {
-		http.Error(w, "认证失败", http.StatusForbidden)
+		// 凭证错误也返回 407（而不是 403），让客户端可以重新提示用户
+		s.writeProxyAuthRequired(w)
 		return
 	}
 
@@ -2049,17 +2249,13 @@ func (s *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleConnect 处理 HTTPS CONNECT 隧道
 func (s *HTTPProxyServer) handleConnect(w http.ResponseWriter, r *http.Request, params parser.Params) {
-	targetConn, workerID, err := s.dialTarget(r.Context(), params, r.Host)
+	targetConn, err := s.dialTarget(r.Context(), params, r.Host)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("连接目标失败: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer func() {
-		targetConn.Close()
-		s.resolver.UntrackConn(workerID)
-	}()
+	defer targetConn.Close()
 
-	// 劫持客户端连接
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "不支持 hijack", http.StatusInternalServerError)
@@ -2072,32 +2268,27 @@ func (s *HTTPProxyServer) handleConnect(w http.ResponseWriter, r *http.Request, 
 	}
 	defer clientConn.Close()
 
-	// 发送 200 连接建立
-	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		return
+	}
 
-	// 双向 pipe
 	s.pipe(clientConn, targetConn)
 }
 
 // handleHTTP 处理普通 HTTP 代理请求
 func (s *HTTPProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, params parser.Params) {
-	// 确保有 host
 	host := r.Host
 	if !strings.Contains(host, ":") {
 		host = host + ":80"
 	}
 
-	targetConn, workerID, err := s.dialTarget(r.Context(), params, host)
+	targetConn, err := s.dialTarget(r.Context(), params, host)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("连接目标失败: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer func() {
-		targetConn.Close()
-		s.resolver.UntrackConn(workerID)
-	}()
+	defer targetConn.Close()
 
-	// 转发请求
 	r.Header.Del("Proxy-Authorization")
 	r.Header.Del("Proxy-Connection")
 	r.RequestURI = ""
@@ -2107,7 +2298,6 @@ func (s *HTTPProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, par
 		return
 	}
 
-	// 劫持并 pipe 响应
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "不支持 hijack", http.StatusInternalServerError)
@@ -2122,25 +2312,26 @@ func (s *HTTPProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, par
 	s.pipe(clientConn, targetConn)
 }
 
-func (s *HTTPProxyServer) dialTarget(ctx context.Context, params parser.Params, address string) (net.Conn, string, error) {
+// dialTarget 通过 router 选择 worker，并返回一个在 Close 时自动 UntrackConn 的连接
+func (s *HTTPProxyServer) dialTarget(ctx context.Context, params parser.Params, address string) (net.Conn, error) {
 	w, err := s.router.Route(params)
 	if err != nil {
-		return nil, "", fmt.Errorf("路由失败: %w", err)
+		return nil, fmt.Errorf("路由失败: %w", err)
 	}
 
 	nsHandle, err := s.resolver.GetWorkerNsHandle(w.ID)
 	if err != nil {
-		return nil, "", fmt.Errorf("获取命名空间失败: %w", err)
+		return nil, fmt.Errorf("获取命名空间失败: %w", err)
 	}
 
 	s.resolver.TrackConn(w.ID)
 	conn, err := s.dialer.DialInNs(ctx, nsHandle, "tcp", address)
 	if err != nil {
 		s.resolver.UntrackConn(w.ID)
-		return nil, "", err
+		return nil, err
 	}
 
-	return conn, w.ID, nil
+	return &trackedConn{Conn: conn, workerID: w.ID, resolver: s.resolver}, nil
 }
 
 // parseProxyAuth 解析 Proxy-Authorization header
@@ -2149,33 +2340,34 @@ func (s *HTTPProxyServer) parseProxyAuth(r *http.Request) (username, password st
 	if auth == "" {
 		return "", "", false
 	}
-
 	if !strings.HasPrefix(auth, "Basic ") {
 		return "", "", false
 	}
-
 	decoded, err := base64.StdEncoding.DecodeString(auth[6:])
 	if err != nil {
 		return "", "", false
 	}
-
 	parts := strings.SplitN(string(decoded), ":", 2)
 	if len(parts) != 2 {
 		return "", "", false
 	}
-
 	return parts[0], parts[1], true
 }
 
-// pipe 双向数据传输
+// pipe 双向数据传输，等待两个方向都结束后再返回（确保 response 完整转发）
 func (s *HTTPProxyServer) pipe(conn1, conn2 net.Conn) {
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
-		io.Copy(dst, src)
+		_, _ = io.Copy(dst, src)
+		// 半关闭写端，通知对端 EOF，让另一方向的 Copy 也能返回
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
 		done <- struct{}{}
 	}
 	go cp(conn1, conn2)
 	go cp(conn2, conn1)
+	<-done
 	<-done
 }
 ```
@@ -2397,7 +2589,10 @@ services:
   gateway:
     build: .
     cap_add:
+      # NET_ADMIN: 创建 veth、设置 iptables、配置路由
       - NET_ADMIN
+      # SYS_ADMIN: Go 进程调用 setns(2) 进入 worker 命名空间拨号时必需
+      - SYS_ADMIN
     devices:
       - /dev/net/tun
     ports:
@@ -2415,6 +2610,12 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
 ```
+
+> **关于 capabilities：**
+> - `NET_ADMIN` 允许创建网络命名空间、veth、tun 设备，以及写 iptables 规则。
+> - `SYS_ADMIN` 是 Go 代码通过 `netns.Set(handle)` 切换命名空间（内部调用 `setns(2)`）所必需的。
+>   Alpine / glibc 下若缺少此 capability 会导致 `operation not permitted`。
+> - `--privileged` 是上述两者的超集，仅在调试且其他方法不通时使用。
 
 - [ ] **Step 4: Verify Docker build**
 
@@ -2532,4 +2733,23 @@ git commit -m "fix: 集成测试中发现的问题修复"
 - `WorkerPool` 接口在 `router` 包中定义，`worker.Manager` 实现一致
 - `NsHandleResolver` 接口在 `proxy` 包中定义，`worker.Manager` 实现一致
 - `parser.Params` 在所有引用处字段名一致
-- `session.Session` 字段名在 manager 和 router 中一致
+- `session.Snapshot` 值类型返回，避免暴露内部指针
+- `internal/worker/*.go` 统一 `package worker`（不再有 package 冲突）
+
+**Codex review 修复清单：**
+- [x] Session Manager 返回值类型 `Snapshot`，不暴露内部指针
+- [x] Router 移除全局 mutex，靠 session manager 的锁 + 原子计数器
+- [x] netns `Destroy` 使用存储的 subnet 字符串清理 iptables（避免 16-byte IPv4 偏移 bug）
+- [x] netns 添加 kill-switch（OUTPUT DROP，仅允许 lo/ESTABLISHED/DNS/tun+/veth peer）
+- [x] netns 写入 `/etc/netns/<name>/resolv.conf` 防 DNS 泄漏
+- [x] `internal/worker` 合并为单一 `package worker`
+- [x] Worker 索引原子捕获（`Add(1)-1`），不再出现重复
+- [x] OpenVPN 存活检查用后台 Wait 协程 + `atomic.Bool`
+- [x] `checkWorkers` 持锁阶段只改 map，`Stop()` 在锁外执行
+- [x] Worker 创建失败重试 2 次（spec 要求），并用 singleflight 合并并发请求
+- [x] SOCKS5 `CredentialStore.Valid(user, password, userAddr)` 三参数签名
+- [x] SOCKS5 改用 `WithDialAndRequest`，从 `request.AuthContext.Payload["Username"]` 取用户名
+- [x] `trackedConn.closed` 改为 `atomic.Bool`
+- [x] HTTP 代理认证失败返回 `407` + `Proxy-Authenticate`（非 403）
+- [x] HTTP `pipe` 等待双向都结束，使用 `CloseWrite` 半关闭
+- [x] Dockerfile / docker-compose 加入 `SYS_ADMIN` capability（setns 所需）

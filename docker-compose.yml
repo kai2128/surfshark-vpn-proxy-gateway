@@ -4,6 +4,12 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
+    # 默认的 docker-default AppArmor 策略会拦截 mount 系统调用（即使带 SYS_ADMIN）。
+    # seccomp 默认策略对某些 unshare/mount 组合同样受限。
+    # 创建网络命名空间需要 unshare(CLONE_NEWNET) + mount --bind，因此必须放开。
+    security_opt:
+      - apparmor:unconfined
+      - seccomp:unconfined
     devices:
       - /dev/net/tun
     ports:

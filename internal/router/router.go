@@ -97,17 +97,6 @@ func (r *Router) selectOrCreate(country string) (*WorkerInfo, error) {
 		return workers[index%uint64(len(workers))], nil
 	}
 
-	if country == "" {
-		workers = r.pool.GetReadyWorkers("")
-		if len(workers) > 0 {
-			sort.Slice(workers, func(i, j int) bool {
-				return workers[i].ID < workers[j].ID
-			})
-			index := r.roundRobin.Add(1) - 1
-			return workers[index%uint64(len(workers))], nil
-		}
-	}
-
 	worker, err := r.pool.RequestWorker(country)
 	if err != nil {
 		return nil, fmt.Errorf("request worker for country %q: %w", country, err)

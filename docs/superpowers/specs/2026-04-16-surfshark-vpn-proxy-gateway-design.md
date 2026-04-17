@@ -177,6 +177,7 @@ Go 主进程在主 netns 接收客户端连接，选择目标 worker 后：
 docker build -t surfshark-proxy .
 docker run -d \
   --cap-add=NET_ADMIN \
+  --cap-add=SYS_ADMIN \
   --device=/dev/net/tun \
   -v ./ovpn:/etc/openvpn/ovpn:ro \
   -v ./auth.txt:/etc/openvpn/auth.txt:ro \
@@ -186,6 +187,9 @@ docker run -d \
   -p 8888:8888 \
   surfshark-proxy
 ```
+
+> 需要 `SYS_ADMIN`：Go 代码通过 `setns(2)` 切换到 worker 命名空间拨号，
+> 没有此 capability 会 `operation not permitted`。
 
 ### 使用示例
 

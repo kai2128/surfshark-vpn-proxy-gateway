@@ -24,6 +24,7 @@ type Worker struct {
 	processDone chan struct{}
 
 	ID          string
+	Index       int
 	Server      discovery.Server
 	State       router.WorkerState
 	Namespace   *nsmanager.Namespace
