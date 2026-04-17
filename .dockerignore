@@ -1,0 +1,7 @@
+.git
+.claude
+.mcp.json
+docs
+*.md
+ovpn
+auth.txt

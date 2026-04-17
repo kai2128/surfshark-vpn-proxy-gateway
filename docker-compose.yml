@@ -1,0 +1,22 @@
+services:
+  gateway:
+    build: .
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    devices:
+      - /dev/net/tun
+    ports:
+      - "1080:1080"
+      - "8888:8888"
+    volumes:
+      - ./ovpn:/etc/openvpn/ovpn:ro
+      - ./auth.txt:/etc/openvpn/auth.txt:ro
+    environment:
+      PROXY_USER: ${PROXY_USER:-user}
+      PROXY_PASS: ${PROXY_PASS:-pass}
+      DEFAULT_SESSION_TTL: ${DEFAULT_SESSION_TTL:-30}
+      WORKER_IDLE_TIMEOUT: ${WORKER_IDLE_TIMEOUT:-10}
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    restart: unless-stopped
