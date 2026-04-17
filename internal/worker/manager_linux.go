@@ -36,14 +36,18 @@ type Manager struct {
 	authFile    string
 	sessionMgr  *session.Manager
 	idleTimeout time.Duration
+	minPoolSize int
 	createGroup singleflight.Group
 	// wakeup 用于在 worker 进程退出时立刻触发健康检查，
 	// 避免等待 30 秒 ticker。缓冲为 1：多次信号合并为一次检查。
 	wakeup chan struct{}
+	// grow 通知池扩容协程去补齐到 minPoolSize。
+	// 缓冲为 1：多次信号合并为一次检查。
+	grow chan struct{}
 }
 
 // New 创建 worker 管理器。
-func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration) *Manager {
+func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration, minPoolSize int) *Manager {
 	return &Manager{
 		workers:     make(map[string]*Worker),
 		usedIndexes: make(map[int]bool),
@@ -51,7 +55,9 @@ func New(servers map[string][]discovery.Server, authFile string, sessionMgr *ses
 		authFile:    authFile,
 		sessionMgr:  sessionMgr,
 		idleTimeout: idleTimeout,
+		minPoolSize: minPoolSize,
 		wakeup:      make(chan struct{}, 1),
+		grow:        make(chan struct{}, 1),
 	}
 }
 
@@ -61,6 +67,29 @@ func (m *Manager) signalWakeup() {
 	case m.wakeup <- struct{}{}:
 	default:
 	}
+}
+
+// signalGrow 非阻塞地唤醒池扩容协程。
+func (m *Manager) signalGrow() {
+	select {
+	case m.grow <- struct{}{}:
+	default:
+	}
+}
+
+// countReady 返回处于 Ready/Idle 状态的 worker 数量。
+func (m *Manager) countReady() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	count := 0
+	for _, worker := range m.workers {
+		info := worker.Info()
+		if info.State == router.WorkerReady || info.State == router.WorkerIdle {
+			count++
+		}
+	}
+	return count
 }
 
 // acquireIndex 分配最小可用的 netns 索引，找不到返回 -1。
@@ -380,6 +409,44 @@ func (m *Manager) checkWorkers() {
 		_ = victim.worker.Stop()
 		m.sessionMgr.RemoveByWorker(victim.id)
 	}
+
+	// 回收完 worker，池可能跌破 minPoolSize，让扩容协程补位。
+	if len(victims) > 0 {
+		m.signalGrow()
+	}
+}
+
+// StartPoolWarmer 启动池扩容协程，按需创建 worker 把池补齐到 minPoolSize。
+// 串行创建：同一时刻只创建一个 worker，避免瞬时资源压力。
+func (m *Manager) StartPoolWarmer(ctx context.Context) {
+	if m.minPoolSize <= 0 {
+		return
+	}
+
+	// 启动时先触发一次，让池从 0 长到目标大小。
+	m.signalGrow()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-m.grow:
+			}
+
+			// 循环补位：每次创建一个，直到达到目标或失败。
+			for ctx.Err() == nil {
+				if m.countReady() >= m.minPoolSize {
+					break
+				}
+
+				if _, err := m.createForCountry(""); err != nil {
+					log.Printf("池扩容失败（当前 %d/%d）: %v", m.countReady(), m.minPoolSize, err)
+					break
+				}
+			}
+		}
+	}()
 }
 
 // Shutdown 停止所有 worker。

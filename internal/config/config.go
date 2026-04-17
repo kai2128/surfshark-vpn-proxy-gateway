@@ -16,6 +16,7 @@ type Config struct {
 	AuthFile          string
 	DefaultSessionTTL time.Duration
 	WorkerIdleTimeout time.Duration
+	MinPoolSize       int
 }
 
 // Load 从环境变量读取配置，未设置时回落到默认值。
@@ -29,6 +30,7 @@ func Load() Config {
 		AuthFile:          getEnvStr("AUTH_FILE", "/etc/openvpn/auth.txt"),
 		DefaultSessionTTL: time.Duration(getEnvInt("DEFAULT_SESSION_TTL", 30)) * time.Minute,
 		WorkerIdleTimeout: time.Duration(getEnvInt("WORKER_IDLE_TIMEOUT", 10)) * time.Minute,
+		MinPoolSize:       getEnvInt("MIN_POOL_SIZE", 10),
 	}
 }
 

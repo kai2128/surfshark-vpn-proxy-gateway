@@ -17,11 +17,12 @@ import (
 type Manager struct{}
 
 // New 返回一个不可用的 stub manager。
-func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration) *Manager {
+func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout time.Duration, minPoolSize int) *Manager {
 	_ = servers
 	_ = authFile
 	_ = sessionMgr
 	_ = idleTimeout
+	_ = minPoolSize
 	return &Manager{}
 }
 
@@ -60,6 +61,12 @@ func (m *Manager) UntrackConn(workerID string) {
 
 // StartHealthCheck 在非 Linux 环境下为空操作。
 func (m *Manager) StartHealthCheck(ctx context.Context) {
+	_ = m
+	_ = ctx
+}
+
+// StartPoolWarmer 在非 Linux 环境下为空操作。
+func (m *Manager) StartPoolWarmer(ctx context.Context) {
 	_ = m
 	_ = ctx
 }
