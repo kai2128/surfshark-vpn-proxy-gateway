@@ -9,33 +9,51 @@ import (
 
 // Config 存储网关运行所需的配置。
 type Config struct {
-	Socks5Port        int
-	HTTPPort          int
-	ProxyUser         string
-	ProxyPass         string
-	OvpnDir           string
-	AuthFile          string
-	DefaultSessionTTL time.Duration
-	WorkerIdleTimeout time.Duration
-	WorkerMaxLifetime time.Duration
-	MinPoolSize       int
-	WorkerVerbose     bool
+	Socks5Port              int
+	HTTPPort                int
+	ProxyUser               string
+	ProxyPass               string
+	OvpnDir                 string
+	AuthFile                string
+	DefaultSessionTTL       time.Duration
+	WorkerIdleTimeout       time.Duration
+	WorkerMaxLifetime       time.Duration
+	MinPoolSize             int
+	WorkerVerbose           bool
+	PreconnectConcurrency   int
+	WorkerLifetimeJitterPct int
+	WorkerRotationGrace     time.Duration
 }
 
 // Load 从环境变量读取配置，未设置时回落到默认值。
 func Load() Config {
+	concurrency := getEnvInt("PRECONNECT_CONCURRENCY", 3)
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+
+	jitter := getEnvInt("WORKER_LIFETIME_JITTER_PCT", 10)
+	if jitter < 0 {
+		jitter = 0
+	} else if jitter > 50 {
+		jitter = 50
+	}
+
 	return Config{
-		Socks5Port:        getEnvInt("SOCKS5_PORT", 1080),
-		HTTPPort:          getEnvInt("HTTP_PORT", 8888),
-		ProxyUser:         getEnvStr("PROXY_USER", "user"),
-		ProxyPass:         getEnvStr("PROXY_PASS", "pass"),
-		OvpnDir:           getEnvStr("OVPN_DIR", "/etc/openvpn/ovpn"),
-		AuthFile:          getEnvStr("AUTH_FILE", "/etc/openvpn/auth.txt"),
-		DefaultSessionTTL: time.Duration(getEnvInt("DEFAULT_SESSION_TTL", 30)) * time.Minute,
-		WorkerIdleTimeout: time.Duration(getEnvInt("WORKER_IDLE_TIMEOUT", 10)) * time.Minute,
-		WorkerMaxLifetime: time.Duration(getEnvInt("WORKER_MAX_LIFETIME", 0)) * time.Minute,
-		MinPoolSize:       getEnvInt("MIN_POOL_SIZE", 10),
-		WorkerVerbose:     getEnvBool("WORKER_VERBOSE", false),
+		Socks5Port:              getEnvInt("SOCKS5_PORT", 1080),
+		HTTPPort:                getEnvInt("HTTP_PORT", 8888),
+		ProxyUser:               getEnvStr("PROXY_USER", "user"),
+		ProxyPass:               getEnvStr("PROXY_PASS", "pass"),
+		OvpnDir:                 getEnvStr("OVPN_DIR", "/etc/openvpn/ovpn"),
+		AuthFile:                getEnvStr("AUTH_FILE", "/etc/openvpn/auth.txt"),
+		DefaultSessionTTL:       time.Duration(getEnvInt("DEFAULT_SESSION_TTL", 30)) * time.Minute,
+		WorkerIdleTimeout:       time.Duration(getEnvInt("WORKER_IDLE_TIMEOUT", 10)) * time.Minute,
+		WorkerMaxLifetime:       time.Duration(getEnvInt("WORKER_MAX_LIFETIME", 0)) * time.Minute,
+		MinPoolSize:             getEnvInt("MIN_POOL_SIZE", 10),
+		WorkerVerbose:           getEnvBool("WORKER_VERBOSE", false),
+		PreconnectConcurrency:   concurrency,
+		WorkerLifetimeJitterPct: jitter,
+		WorkerRotationGrace:     time.Duration(getEnvInt("WORKER_ROTATION_GRACE_MINUTES", 0)) * time.Minute,
 	}
 }
 

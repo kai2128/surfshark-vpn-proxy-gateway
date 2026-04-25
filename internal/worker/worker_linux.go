@@ -4,6 +4,7 @@ package worker
 
 import (
 	"fmt"
+	"math/rand"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,9 @@ type Worker struct {
 	ActiveConns int
 	CreatedAt   time.Time
 	LastUsed    time.Time
+
+	effectiveMaxLifetime time.Duration
+	rotationScheduledAt  time.Time
 
 	processExited atomic.Bool
 }
@@ -138,6 +142,67 @@ func (w *Worker) isClosingDrained() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.State == router.WorkerClosing && w.ActiveConns == 0
+}
+
+// markAwaitingReplacement 仅允许 Ready/Idle 进入 AwaitingReplacement。
+func (w *Worker) markAwaitingReplacement() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.State == router.WorkerReady || w.State == router.WorkerIdle {
+		w.State = router.WorkerAwaitingReplacement
+		w.rotationScheduledAt = time.Now()
+		return true
+	}
+
+	return false
+}
+
+// isAwaitingReplacement 返回当前 worker 是否正在等待替换。
+func (w *Worker) isAwaitingReplacement() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.State == router.WorkerAwaitingReplacement
+}
+
+// rotationScheduledSince 返回进入 AwaitingReplacement 的时间。
+func (w *Worker) rotationScheduledSince() time.Time {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.rotationScheduledAt
+}
+
+// markClosingFromAwaiting 仅允许 AwaitingReplacement 进入 Closing。
+func (w *Worker) markClosingFromAwaiting() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.State == router.WorkerAwaitingReplacement {
+		w.State = router.WorkerClosing
+		return true
+	}
+
+	return false
+}
+
+// effectiveLifetime 返回 worker 的有效寿命；未设置时由调用方决定兜底值。
+func (w *Worker) effectiveLifetime() time.Duration {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.effectiveMaxLifetime
+}
+
+// computeEffectiveMaxLifetime 对最大寿命应用单向向下的抖动。
+func computeEffectiveMaxLifetime(base time.Duration, jitterPct int) time.Duration {
+	if base <= 0 || jitterPct <= 0 {
+		return base
+	}
+	if jitterPct > 50 {
+		jitterPct = 50
+	}
+
+	cut := time.Duration(float64(base) * rand.Float64() * float64(jitterPct) / 100)
+	return base - cut
 }
 
 // Stop 停止进程并释放命名空间资源。

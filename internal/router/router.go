@@ -17,6 +17,7 @@ const (
 	WorkerReady
 	WorkerIdle
 	WorkerClosing
+	WorkerAwaitingReplacement
 )
 
 // WorkerInfo 是路由器依赖的最小 worker 视图。
@@ -29,6 +30,7 @@ type WorkerInfo struct {
 // WorkerPool 提供 worker 查询与按需创建能力。
 type WorkerPool interface {
 	GetReadyWorkers(country string) []*WorkerInfo
+	GetRoutableWorkers(country string) []*WorkerInfo
 	RequestWorker(country string) (*WorkerInfo, error)
 }
 
@@ -87,7 +89,7 @@ func (r *Router) findReady(workerID string) *WorkerInfo {
 }
 
 func (r *Router) selectOrCreate(country string) (*WorkerInfo, error) {
-	workers := r.pool.GetReadyWorkers(country)
+	workers := r.pool.GetRoutableWorkers(country)
 	if len(workers) > 0 {
 		sort.Slice(workers, func(i, j int) bool {
 			return workers[i].ID < workers[j].ID

@@ -17,7 +17,17 @@ import (
 type Manager struct{}
 
 // New 返回一个不可用的 stub manager。
-func New(servers map[string][]discovery.Server, authFile string, sessionMgr *session.Manager, idleTimeout, maxLifetime time.Duration, minPoolSize int, verbose bool) *Manager {
+func New(
+	servers map[string][]discovery.Server,
+	authFile string,
+	sessionMgr *session.Manager,
+	idleTimeout, maxLifetime time.Duration,
+	minPoolSize int,
+	verbose bool,
+	preconnectConcurrency int,
+	lifetimeJitterPct int,
+	rotationGrace time.Duration,
+) *Manager {
 	_ = servers
 	_ = authFile
 	_ = sessionMgr
@@ -25,11 +35,21 @@ func New(servers map[string][]discovery.Server, authFile string, sessionMgr *ses
 	_ = maxLifetime
 	_ = minPoolSize
 	_ = verbose
+	_ = preconnectConcurrency
+	_ = lifetimeJitterPct
+	_ = rotationGrace
 	return &Manager{}
 }
 
 // GetReadyWorkers 在非 Linux 环境下返回空列表。
 func (m *Manager) GetReadyWorkers(country string) []*router.WorkerInfo {
+	_ = m
+	_ = country
+	return nil
+}
+
+// GetRoutableWorkers 在非 Linux 环境下返回空列表。
+func (m *Manager) GetRoutableWorkers(country string) []*router.WorkerInfo {
 	_ = m
 	_ = country
 	return nil
@@ -69,6 +89,12 @@ func (m *Manager) StartHealthCheck(ctx context.Context) {
 
 // StartPoolWarmer 在非 Linux 环境下为空操作。
 func (m *Manager) StartPoolWarmer(ctx context.Context) {
+	_ = m
+	_ = ctx
+}
+
+// StartPreconnectCoordinator 在非 Linux 环境下为空操作。
+func (m *Manager) StartPreconnectCoordinator(ctx context.Context) {
 	_ = m
 	_ = ctx
 }

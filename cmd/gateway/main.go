@@ -40,11 +40,23 @@ func main() {
 	defer cancel()
 
 	sessionManager := session.NewManager(cfg.DefaultSessionTTL)
-	workerManager := workermgr.New(servers, cfg.AuthFile, sessionManager, cfg.WorkerIdleTimeout, cfg.WorkerMaxLifetime, cfg.MinPoolSize, cfg.WorkerVerbose)
+	workerManager := workermgr.New(
+		servers,
+		cfg.AuthFile,
+		sessionManager,
+		cfg.WorkerIdleTimeout,
+		cfg.WorkerMaxLifetime,
+		cfg.MinPoolSize,
+		cfg.WorkerVerbose,
+		cfg.PreconnectConcurrency,
+		cfg.WorkerLifetimeJitterPct,
+		cfg.WorkerRotationGrace,
+	)
 	routerInstance := router.New(workerManager, sessionManager)
 
 	go cleanupSessions(ctx, sessionManager)
 	workerManager.StartHealthCheck(ctx)
+	workerManager.StartPreconnectCoordinator(ctx)
 	workerManager.StartPoolWarmer(ctx)
 
 	socks5Server := proxy.NewSocks5Server(cfg, routerInstance, workerManager)
